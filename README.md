@@ -1,6 +1,5 @@
 # TSGExplorer
-Reverse engineering toolkit and editor for every version of The Simpsons Game (2007)
-Extract, view, edit and explore every asset from the game's containers: textures, 3D models, level geometry, audio, dialogue, scripts, animations, and more. Includes both a command-line tool and a full graphical explorer with 3D level viewer.
+A reverse engineering toolkit and editor for every version of The Simpsons Game (2007). You'll be able to extract, view, edit and explore every asset from the game's containers: textures, 3D models, level geometry, audio, dialogue, scripts, animations, and more. Includes both a command-line tool and a full graphical explorer with 3D level viewer.
 
 Currently supports the **Old-Gen builds** (Wii / PS2 / PSP), which use Rebellion's Asura engine. The Xbox 360 and PS3 versions use a completely different engine and are not yet supported.
 
@@ -44,7 +43,7 @@ PySide6 (Qt6) application with:
 
 ## Supported formats
 
-### Old-Gen (Asura engine — Wii / PS2 / PSP)
+### Old-Gen (Asura engine - Wii / PS2 / PSP)
 
 Both platforms use the same Asura chunk system. The tool auto-detects endianness (big-endian for Wii, little-endian for PS2) and normalizes chunk IDs so everything works transparently.
 
@@ -78,35 +77,6 @@ Not yet supported. The new-gen versions use a completely different engine and fi
 
 ---
 
-## Asset types decoded (Old-Gen)
-
-**49 chunk types** across 101 levels (52 prototype + 49 final) have been identified and catalogued. The following are fully decoded and extractable:
-
-- **Textures** — All 8 GX texture formats (I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, CMPR), Simpsons palette LUT, alpha atlas compositing
-- **Prop models** — v6 (prototype tristrips) and v14 (final GX display lists)
-- **Character models** — SmoothSkin cv0–cv3, bone weights, split-part assembly
-- **Skeletons** — NKSH bone hierarchy with rest pose transforms
-- **Animations** — NACH channels with quaternion keyframes, slerp interpolation
-- **Level geometry** — StrippedEnv v0 (compressed tristrips) and v1 (GX display lists), per-strip materials and vertex colors
-- **Audio** — DSP ADPCM individual clips + Bink Audio banks
-- **Dialogue** — NLLD subtitles with speaker IDs and timing
-- **Localized text** — TXTH with mul-31 hash labels
-- **Scripts** — GSMS bytecode (108 decoded opcodes, 90K+ messages)
-- **Entity instances** — ITNE placement data with positions, rotations, types
-- **Blueprints** — EULB actor/weapon definitions from Common.asr
-- **Collision** — NEHP physics mesh (vertices + faces + per-sector ranges)
-- **Navigation** — 1VAN waypoint mesh with connections and zones
-- **Materials** — TXET/LFXT/LRTM triplet system
-- **Environment** — BYKS skybox, GOF fog, RHTW weather, DOME sections
-- **Splines** — GamesceneSpline and LiftSpline control points
-- **Clichés** — Award locations resolved from GSMS scripts
-- **Sound events** — MSDS code-triggered + VELD voice events
-- **And more** — morph targets, bone attachments, particle FX, UI menus, cutscene definitions...
-
-See [`docs/FORMAT_REFERENCE.md`](docs/FORMAT_REFERENCE.md) for the complete technical specification.
-
----
-
 ## Installation
 
 **Requirements:** Python 3.9+
@@ -133,7 +103,7 @@ pip install -r requirements.txt
 python tsg_explorer.py
 ```
 
-The explorer opens with a dark-themed window. Use **File → Open** to load any `.wii`, `.enBE`, `.asrBE`, or `.asr` file. You can also drag-and-drop files or use **File → Open Folder** to scan an entire game directory.
+Use **File → Open** to load any `.wii`, `.enBE`, `.asrBE`, or `.asr` file. You can also drag-and-drop files or use **File → Open Folder** to scan an entire game directory.
 
 ### Building a standalone executable
 
