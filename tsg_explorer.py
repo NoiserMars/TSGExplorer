@@ -7,7 +7,7 @@ audio, dialogue, scripts, animations, and full level visualization.
 
 Requires: PySide6, Pillow, numpy, PyOpenGL (optional, for 3D views)
 """
-VERSION = "2026.04.13"
+VERSION = "2026.04.18"
 APP_NAME = "TSGExplorer"
 import sys, os, struct, io, wave, array, tempfile, math
 from collections import defaultdict
@@ -17,7 +17,13 @@ from PySide6.QtGui import *
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import tsg_tool as asura
+import tsg_oldgen as asura
+try:
+    import tsg_newgen as ng
+    import tsg_game_data as gd
+    HAS_NEWGEN = True
+except ImportError:
+    HAS_NEWGEN = False
 try:
     from level_viewport import LevelViewport3D, HAS_GL
 except ImportError:
@@ -84,7 +90,7 @@ class TexturePanel(QWidget):
     def load_texture(self, f, owner):
         self._file = f; self._owner = owner
         fmt_names = {0:'I4',1:'I8',2:'IA4',3:'IA8',4:'RGB565',5:'RGB5A3',6:'RGBA8',14:'CMPR'}
-        import tsg_tool as _a
+        import tsg_oldgen as _a
         imgs = _a.parse_tpl(f['data'])
         if imgs:
             i0 = imgs[0]; fn = fmt_names.get(i0['fmt'], f"?({i0['fmt']})")
@@ -638,7 +644,7 @@ def _decode_chunk_info(c, all_chunks=None):
         if cid == 'ITNE':
             eid = struct.unpack_from('>I', d, 0)[0]
             etype = struct.unpack_from('>H', d, 4)[0]
-            # Use canonical entity type names from tsg_tool module
+            # Use canonical entity type names from tsg_oldgen module
             _ENTITY_DISPLAY_NAMES = {
                 0x0001:'Time Trigger',0x0003:'Cutscene Controller',0x0007:'Physics Object',
                 0x0009:'Destructible Light',0x000B:'Splitter Block',0x000D:'Counted Trigger',
@@ -2247,7 +2253,7 @@ class AnimationView(QWidget):
 
     def load_data(self, chunks):
         """Load animations, skeletons, and character meshes from parsed chunks."""
-        import tsg_tool as _a
+        import tsg_oldgen as _a
         self._skeletons = []
         for c in chunks:
             if c['id'] == 'NKSH':
@@ -2284,7 +2290,7 @@ class AnimationView(QWidget):
     def _filter(self): self._populate()
 
     def _on_select(self, row, col, prev_row, prev_col):
-        import tsg_tool as _a
+        import tsg_oldgen as _a
         f = self.search.text().lower()
         filtered = [i for i, r in enumerate(self._rows) if f in ' '.join(r).lower()] if f else list(range(len(self._rows)))
         if 0 <= row < len(filtered):
@@ -2562,7 +2568,7 @@ class AnimationView(QWidget):
             if not self._use_anim_gl:
                 self.skel_canvas.setText("Select an animation")
             return
-        import tsg_tool as _a
+        import tsg_oldgen as _a
         try:
             bone_pos, bone_links = _a.get_animation_bone_positions(
                 self._cur_skeleton, self._cur_anim, self._frame_t)
@@ -2782,7 +2788,7 @@ def mul31_hash(s):
 
 def parse_level_data(chunks, files):
     """Extract complete level placement data from parsed chunks."""
-    import tsg_tool as _a
+    import tsg_oldgen as _a
     
     # Build model hash lookup
     model_hashes = {}
@@ -3483,13 +3489,95 @@ class GeckoCodeDialog(QDialog):
         QApplication.clipboard().setText(self._output.toPlainText())
 
 
+# ============================================================
+# New-Gen (EARS Engine) Support Classes
+# ============================================================
+
+NG_RTYPE_ICONS = {
+    'EARS_MESH': '🔷', 'MetaModel': '📦', 'EARS_ITXD': '🖼️',
+    'HKO': '⚙️', 'HKT': '⚙️', 'VFX': '✨', 'BNK': '🔊',
+    'SBK': '🎵', 'AMX': '🎶', 'LH2': '📝', 'TOB': '💬',
+    'CHA': '🗣️', 'CHT': '🗣️', 'GRAPH': '🗺️', 'BSP': '🏗️',
+    'StreamTOC': '📂', 'UIX': '🖥️', 'FFN': '🔤', 'RCB': '🎬',
+    'SMB': '📻', 'TRINITY_SEQ_MASTER': '🎥',
+}
+
+class NGResourceManager:
+    """Cross-file resource manager for new-gen STR archives."""
+    def __init__(self):
+        self.game_dir = None
+        self.str_files = {}     # path → entry dict
+        self.resources = {}     # (filename, type) → resource data
+        self.entity_cache = {}
+
+    def set_game_directory(self, path):
+        self.game_dir = path
+        self.str_files.clear()
+        self.resources.clear()
+        self.entity_cache.clear()
+        str_paths = []
+        for root, dirs, files in os.walk(path):
+            for f in sorted(files):
+                if f.lower().endswith('.str'):
+                    str_paths.append(os.path.join(root, f))
+        return str_paths
+
+    def load_str(self, path):
+        data = open(path, 'rb').read()
+        try:
+            assets, sgs, header = ng.extract_str_assets(data)
+        except Exception as e:
+            return None, str(e)
+        rel_path = os.path.relpath(path, self.game_dir) if self.game_dir else os.path.basename(path)
+        entry = {'path': path, 'rel_path': rel_path, 'size': len(data),
+                 'assets': assets, 'simgroups': sgs, 'header': header}
+        self.str_files[path] = entry
+        for a in assets:
+            self.resources[(a.get('filename',''), a.get('resource_type',''))] = a
+        return entry, None
+
+    def get_entity_list(self, str_path):
+        if str_path in self.entity_cache:
+            return self.entity_cache[str_path]
+        entry = self.str_files.get(str_path)
+        if not entry: return []
+        all_ents = []
+        for sg in entry['simgroups']:
+            if sg.get('n_entities', 0) > 0:
+                try: all_ents.extend(ng.extract_all_entities(sg['raw_data'], sg['n_entities']))
+                except: pass
+        self.entity_cache[str_path] = all_ents
+        return all_ents
+
+
+class NGLoadThread(QThread if 'QThread' in dir() else object):
+    """Background loader for new-gen STR files."""
+    progress = Signal(str, int, int)
+    finished_loading = Signal(str, object, str)
+
+    def __init__(self, res_mgr, paths):
+        super().__init__()
+        self.res_mgr = res_mgr
+        self.paths = paths
+
+    def run(self):
+        for i, path in enumerate(self.paths):
+            self.progress.emit(f"Loading {os.path.basename(path)}...", i, len(self.paths))
+            entry, err = self.res_mgr.load_str(path)
+            self.finished_loading.emit(path, entry, err or '')
+        self.progress.emit("Done", len(self.paths), len(self.paths))
+
+
 class AsuraExplorer(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle(f"{APP_NAME} v{VERSION}"); self.resize(1400,850); self.setMinimumSize(1024, 600)
         self._chunks=[]; self._files=[]; self._data=None; self._path=""; self._emap={}; self._amap={}; self._model_tex_map={}; self._bik_clips=[]
         self._nlld_chunk_indices=[]; self._txth_entries=[]; self._txth_chunk_idx=-1
         self._elf_data = {}  # 'proto_elf', 'final_elf', 'proto_map', 'final_map' etc
-        self._setup_ui(); self._setup_menus(); self.statusBar().showMessage("Ready — Open a .wii file to begin")
+        # New-gen state
+        self._ng_resmgr = NGResourceManager() if HAS_NEWGEN else None
+        self._ng_mode = False  # True when viewing new-gen data
+        self._setup_ui(); self._setup_menus(); self.statusBar().showMessage("Ready — Open a .wii or .str file to begin")
 
     def _setup_ui(self):
         self.sp=QSplitter(Qt.Horizontal); self.setCentralWidget(self.sp)
@@ -3500,7 +3588,7 @@ class AsuraExplorer(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu); self.tree.customContextMenuRequested.connect(self._ctx); ll.addWidget(self.tree)
         left.setMinimumWidth(200); self.sp.addWidget(left)
         self.vs=QStackedWidget()
-        self.welcome=QLabel(f"<div style='text-align:center;padding:60px;'><h1 style='color:#e0a030;'>{APP_NAME}</h1><p style='color:#888;'>Version {VERSION}</p><p style='color:#666;'>Open a .wii file to begin</p><p style='color:#555;font-size:11px;margin-top:20px;'>The Simpsons Game (Wii)</p></div>")
+        self.welcome=QLabel(f"<div style='text-align:center;padding:60px;'><h1 style='color:#e0a030;'>{APP_NAME}</h1><p style='color:#888;'>Version {VERSION}</p><p style='color:#666;'>Open a .wii file (Wii/Asura) or .str file (PS3/X360/EARS)</p><p style='color:#555;font-size:11px;margin-top:20px;'>The Simpsons Game (2007)</p></div>")
         self.welcome.setAlignment(Qt.AlignCenter)
         self.chunkv=ChunkPropsView(); self.texpanel=TexturePanel(); self.audv=AudioPlayer(); self.dlgv=DialogueView(); self.modv=ModelViewer(); self.scrv=ScriptView(); self.animv=AnimationView(); self.lvlv=LevelView(); self.lvlmap=LevelViewer()
         self.animv._owner_ref = self  # for texture loading
@@ -3542,7 +3630,13 @@ class AsuraExplorer(QMainWindow):
 
     def _setup_menus(self):
         fm=self.menuBar().addMenu("&File")
-        oa=QAction("&Open...",self); oa.setShortcut(QKeySequence.Open); oa.triggered.connect(self._open); fm.addAction(oa)
+        oa=QAction("&Open (Wii)...",self); oa.setShortcut(QKeySequence.Open); oa.triggered.connect(self._open); fm.addAction(oa)
+        if HAS_NEWGEN:
+            fm.addSeparator()
+            sa=QAction("Open &STR File (New-Gen)...",self); sa.setShortcut("Ctrl+Shift+O"); sa.triggered.connect(self._open_str); fm.addAction(sa)
+            da=QAction("Open Game &Directory (New-Gen)...",self); da.setShortcut("Ctrl+D"); da.triggered.connect(self._open_game_dir); fm.addAction(da)
+            sfa=QAction("Open Sub&folder (New-Gen)...",self); sfa.setShortcut("Ctrl+Shift+D"); sfa.triggered.connect(self._open_subfolder); fm.addAction(sfa)
+        fm.addSeparator()
         ea=QAction("Open &ELF/DOL...",self); ea.triggered.connect(self._open_elf); fm.addAction(ea)
         self._recent_menu = fm.addMenu("Recent Files"); self._recent_paths = []
         self._load_recent()
@@ -3604,6 +3698,272 @@ class AsuraExplorer(QMainWindow):
     def _open(self):
         p,_=QFileDialog.getOpenFileName(self,"Open","","Asura Files (*.wii *.enBE *.asrBE *.asr *.guiBE);;All (*)")
         if p: self._load(p)
+
+    # ---- New-Gen (EARS Engine) Loading ----
+
+    def _open_str(self):
+        if not HAS_NEWGEN: return
+        p,_=QFileDialog.getOpenFileName(self,"Open STR File","","STR Archives (*.str);;All (*)")
+        if p:
+            self._ng_resmgr.game_dir = os.path.dirname(p)
+            self._load_single_str(p)
+
+    def _open_game_dir(self):
+        if not HAS_NEWGEN: return
+        p=QFileDialog.getExistingDirectory(self,"Select Game Directory (contains .str files)")
+        if p: self._load_game_dir(p)
+
+    def _open_subfolder(self):
+        if not HAS_NEWGEN: return
+        p=QFileDialog.getExistingDirectory(self,"Select Subfolder (e.g., spr_hub, mob_rules)")
+        if p: self._load_game_dir(p)
+
+    def _load_game_dir(self, path):
+        self.statusBar().showMessage(f"Scanning {path}..."); QApplication.processEvents()
+        str_paths = self._ng_resmgr.set_game_directory(path)
+        if not str_paths:
+            QMessageBox.warning(self, "No STR Files", f"No .str files found in:\n{path}"); return
+        self.tree.clear(); self._ng_mode = True
+        self._ng_load_thread = NGLoadThread(self._ng_resmgr, str_paths)
+        self._ng_load_thread.progress.connect(lambda m,c,t: self.statusBar().showMessage(f"{m} ({c}/{t})"))
+        self._ng_load_thread.finished_loading.connect(self._on_ng_str_loaded)
+        self._ng_load_thread.finished.connect(self._on_ng_load_complete)
+        self._ng_load_thread.start()
+
+    def _load_single_str(self, path):
+        self.tree.clear(); self._ng_mode = True
+        self.statusBar().showMessage(f"Loading {os.path.basename(path)}..."); QApplication.processEvents()
+        entry, err = self._ng_resmgr.load_str(path)
+        if err:
+            QMessageBox.warning(self, "Error", f"Failed to load:\n{err}"); return
+        self._add_ng_str_to_tree(path, entry)
+        n_a = len(entry['assets']); n_e = sum(sg.get('n_entities',0) for sg in entry['simgroups'])
+        self.statusBar().showMessage(f"Loaded {os.path.basename(path)}: {n_a} resources, {n_e} entities")
+
+    def _on_ng_str_loaded(self, path, entry, error):
+        if entry and not error:
+            self._add_ng_str_to_tree(path, entry)
+
+    def _on_ng_load_complete(self):
+        total_res = sum(len(e['assets']) for e in self._ng_resmgr.str_files.values())
+        n_files = len(self._ng_resmgr.str_files)
+        self.statusBar().showMessage(f"Loaded {n_files} STR files: {total_res:,} resources")
+
+    def _add_ng_str_to_tree(self, path, entry):
+        rel = entry.get('rel_path', os.path.basename(path))
+        n_assets = len(entry['assets']); n_ents = sum(sg.get('n_entities',0) for sg in entry['simgroups'])
+        str_node = QTreeWidgetItem(self.tree)
+        str_node.setText(0, f"📁 {rel}"); str_node.setText(1, f"{entry['size']//1024}KB"); str_node.setText(2, f"{n_assets} res")
+        str_node.setData(0, Qt.UserRole, ('ng_str', path))
+        str_node.setForeground(0, QColor("#e0a030"))
+        by_type = defaultdict(list)
+        for a in entry['assets']:
+            by_type[a.get('resource_type','Unknown')].append(a)
+        for rtype in sorted(by_type.keys()):
+            assets = by_type[rtype]; icon = NG_RTYPE_ICONS.get(rtype, '📄')
+            type_node = QTreeWidgetItem(str_node)
+            type_node.setText(0, f"{icon} {rtype} ({len(assets)})"); type_node.setText(1, rtype)
+            type_node.setData(0, Qt.UserRole, ('ng_type_group', rtype, path))
+            for a in assets:
+                leaf = QTreeWidgetItem(type_node)
+                leaf.setText(0, a.get('filename','?')); leaf.setText(1, f"{len(a.get('data',b'')):,}"); leaf.setText(2, rtype)
+                leaf.setData(0, Qt.UserRole, ('ng_resource', a, path))
+        if n_ents > 0:
+            ent_node = QTreeWidgetItem(str_node)
+            ent_node.setText(0, f"🎮 Entities ({n_ents})"); ent_node.setText(1, "SimGroup")
+            ent_node.setData(0, Qt.UserRole, ('ng_entities', path))
+
+    def _ng_show_resource(self, asset, str_path):
+        """Show a new-gen resource in the appropriate panel."""
+        rtype = asset.get('resource_type', '')
+        data = asset.get('data', b'')
+        fn = asset.get('filename', '?')
+        parsed = None
+        try:
+            if rtype == 'EARS_MESH':
+                parsed = ng.parse_ears_mesh(data)
+                if parsed and any(sm.get('positions') for sm in parsed.get('submeshes',[])):
+                    # Show mesh info in chunk props view
+                    total_v = sum(len(sm.get('positions',[])) for sm in parsed['submeshes'])
+                    total_t = sum(len(sm.get('triangles',[])) for sm in parsed['submeshes'])
+                    info = f"EARS_MESH: {fn}\n{total_v:,} vertices, {total_t:,} triangles\n{parsed['submesh_count']} submeshes\n"
+                    for si, sm in enumerate(parsed['submeshes']):
+                        nv = len(sm.get('positions',[])); nt = len(sm.get('triangles',[]))
+                        info += f"\nSubmesh {si}: {nv} verts, {nt} tris"
+                        if sm.get('blend_indices'): info += " (skinned)"
+                        if sm.get('positions'):
+                            xs=[p[0] for p in sm['positions']]; ys=[p[1] for p in sm['positions']]; zs=[p[2] for p in sm['positions']]
+                            info += f"\n  bounds: ({min(xs):.2f}..{max(xs):.2f}, {min(ys):.2f}..{max(ys):.2f}, {min(zs):.2f}..{max(zs):.2f})"
+                        for ve in sm.get('vertex_elements',[]):
+                            info += f"\n  +{ve['offset']:2d}: {ve.get('type_name','?'):10s} → {ve.get('usage_name','?')}:{ve['usage_idx']}"
+                    self.chunkv._hex.setPlainText(info)
+                    self.chunkv._title.setText(f"🔷  {fn}")
+                    self.vs.setCurrentWidget(self.chunkv); return
+            elif rtype == 'LH2':
+                parsed = ng.parse_lh2(data)
+                if parsed and parsed.get('entries'):
+                    lines = [f"LH2 Localized Text: {fn}", f"{len(parsed['entries'])} entries\n"]
+                    for e in parsed['entries']:
+                        lines.append(f"  [{e.get('hash',0):#010x}] {e.get('label','')}: {e.get('text','')}")
+                    self.chunkv._hex.setPlainText('\n'.join(lines))
+                    self.chunkv._title.setText(f"📝  {fn}"); self.vs.setCurrentWidget(self.chunkv); return
+            elif rtype == 'BNK':
+                parsed = ng.parse_bnk(data)
+                if parsed:
+                    lines = [f"BNK Sound Bank: {fn}", f"v{parsed['version']}  GUID: {parsed['guid']}", f"Groups: {parsed['n_groups']}, Sounds: {parsed['n_sounds']}\n"]
+                    if parsed['emx_refs']:
+                        lines.append(f"EMX References ({len(parsed['emx_refs'])}):")
+                        for e in sorted(parsed['emx_refs']): lines.append(f"  {e}")
+                    if parsed['anim_events']:
+                        lines.append(f"\nAnimation Events ({len(parsed['anim_events'])}):")
+                        for e in sorted(parsed['anim_events'])[:50]: lines.append(f"  {e}")
+                    self.chunkv._hex.setPlainText('\n'.join(lines))
+                    self.chunkv._title.setText(f"🔊  {fn}"); self.vs.setCurrentWidget(self.chunkv); return
+            elif rtype == 'SMB':
+                parsed = ng.parse_smb(data)
+                if parsed:
+                    lines = [f"Streaming Media Bank: {fn}", f"{parsed['n_entries']} dialogue clips, {len(parsed.get('voice_summary',{}))} characters\n"]
+                    for char in sorted(parsed.get('voice_summary',{}).keys()):
+                        lines.append(f"  {char:20s}: {parsed['voice_summary'][char]:3d} clips")
+                    lines.append(f"\nAll clips:")
+                    for e in parsed['entries']:
+                        lines.append(f"  {e['character']:12s} {e['exa_name']:35s} → {e['snu_filename']}")
+                    self.chunkv._hex.setPlainText('\n'.join(lines))
+                    self.chunkv._title.setText(f"📻  {fn}"); self.vs.setCurrentWidget(self.chunkv); return
+            elif rtype == 'CHA':
+                parsed = ng.parse_cha(data)
+                if parsed:
+                    # Cross-reference with SMB
+                    smb_lookup = {}
+                    entry = self._ng_resmgr.str_files.get(str_path)
+                    if entry:
+                        for a in entry['assets']:
+                            if a.get('resource_type') == 'SMB':
+                                smb_p = ng.parse_smb(a['data'])
+                                if smb_p:
+                                    smb_lookup = {e['guid_suffix']: e for e in smb_p['entries']}
+                                break
+                    lines = [f"Chatter Alias Bank: {fn}", f"{parsed['n_entries']} entries\n"]
+                    for i, e in enumerate(parsed['entries']):
+                        smb_e = smb_lookup.get(e['guid_suffix'])
+                        if smb_e:
+                            lines.append(f"  [{i:2d}] 0x{e['bank_hash']:08X} → {smb_e['exa_name']} ({smb_e['character']})")
+                        else:
+                            lines.append(f"  [{i:2d}] 0x{e['bank_hash']:08X} → guid={e['guid']}")
+                    self.chunkv._hex.setPlainText('\n'.join(lines))
+                    self.chunkv._title.setText(f"🗣️  {fn}"); self.vs.setCurrentWidget(self.chunkv); return
+            elif rtype == 'CHT':
+                parsed = ng.parse_cht(data)
+                if parsed:
+                    events = parsed.get('events', [])
+                    lines = [f"Chatter Template: {fn}", f"{len(events)} events\n"]
+                    for e in events: lines.append(f"  {e}")
+                    self.chunkv._hex.setPlainText('\n'.join(lines))
+                    self.chunkv._title.setText(f"🗣️  {fn}"); self.vs.setCurrentWidget(self.chunkv); return
+            else:
+                # Generic parser
+                parsers = {
+                    'MetaModel': ng.parse_metamodel, 'EARS_ITXD': ng.parse_ears_itxd,
+                    'HKO': ng.parse_havok, 'HKT': ng.parse_havok, 'BSP': ng.parse_bsp,
+                    'GRAPH': ng.parse_graph, 'TOB': ng.parse_tob, 'StreamTOC': ng.parse_stream_toc,
+                    'UIX': ng.parse_uix, 'FFN': ng.parse_ffn, 'SBK': ng.parse_sbk_header,
+                    'VariableDictionary': ng.parse_variable_dict, 'TRINITY_SEQ_MASTER': ng.parse_trinity,
+                    'AMX': ng.parse_amb,
+                }
+                parser = parsers.get(rtype)
+                if parser:
+                    parsed = parser(data)
+        except Exception as e:
+            parsed = {'parse_error': str(e)}
+
+        # Fallback: show parsed dict or hex
+        if parsed:
+            lines = [f"{rtype}: {fn}\n"]
+            for k, v in parsed.items():
+                if isinstance(v, list) and len(v) > 10:
+                    lines.append(f"  {k}: [{len(v)} items]")
+                    for item in v[:5]: lines.append(f"    {item}")
+                    lines.append(f"    ...")
+                elif isinstance(v, dict) and len(str(v)) > 200:
+                    lines.append(f"  {k}: {{...}}")
+                else:
+                    lines.append(f"  {k}: {v}")
+            self.chunkv._hex.setPlainText('\n'.join(lines))
+            self.chunkv._title.setText(f"📋  {fn}"); self.vs.setCurrentWidget(self.chunkv)
+        else:
+            # Raw hex
+            lines = [f"Raw data: {len(data):,} bytes  {rtype}: {fn}\n"]
+            for i in range(0, min(4096, len(data)), 16):
+                hex_str = ' '.join(f'{b:02x}' for b in data[i:i+16])
+                asc = ''.join(chr(b) if 32<=b<127 else '.' for b in data[i:i+16])
+                lines.append(f"  {i:06x}: {hex_str:<48s}  {asc}")
+            if len(data) > 4096: lines.append(f"\n  ... ({len(data)-4096:,} more bytes)")
+            self.chunkv._hex.setPlainText('\n'.join(lines))
+            self.chunkv._title.setText(f"🔢  {fn}"); self.vs.setCurrentWidget(self.chunkv)
+
+    def _ng_show_entities(self, str_path):
+        """Show new-gen entity list in a text view."""
+        entities = self._ng_resmgr.get_entity_list(str_path)
+        lines = [f"Entities: {len(entities)}\n"]
+        classes = defaultdict(int)
+        for e in entities:
+            classes[e['class']] += 1
+        lines.append("By class:")
+        for cls in sorted(classes.keys()):
+            lines.append(f"  {cls:30s}: {classes[cls]:4d}")
+        lines.append(f"\nAll entities:")
+        for e in entities[:200]:
+            pos_str = ""
+            for b in e.get('behaviors', []):
+                for ai, (t, v) in b.get('attrs', {}).items():
+                    if t == 'matrix':
+                        p = v.get('pos', (0,0,0)); pos_str = f"({p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f})"; break
+                if pos_str: break
+            beh_names = [b['name'] for b in e.get('behaviors',[]) if not b['name'].startswith('UNKNOWN')]
+            lines.append(f"  [{e.get('index','?'):4}] {e['class']:25s} {pos_str:25s} {', '.join(beh_names[:3])}")
+        if len(entities) > 200: lines.append(f"\n  ... ({len(entities)-200} more)")
+        self.chunkv._hex.setPlainText('\n'.join(lines))
+        self.chunkv._title.setText(f"🎮  Entities ({len(entities)})"); self.vs.setCurrentWidget(self.chunkv)
+
+    def _ng_export_obj(self, asset):
+        """Export new-gen EARS_MESH as OBJ."""
+        parsed = ng.parse_ears_mesh(asset.get('data', b''))
+        if not parsed: self.statusBar().showMessage("Failed to parse mesh"); return
+        fn = asset.get('filename','mesh').replace('.dff','').replace('.rws','')
+        path,_ = QFileDialog.getSaveFileName(self, "Export as OBJ", f"{fn}.obj", "OBJ (*.obj)")
+        if not path: return
+        obj_text, mtl_text = ng.export_ears_mesh_obj(parsed, fn)
+        if obj_text:
+            open(path,'w').write(obj_text)
+            if mtl_text: open(path.rsplit('.',1)[0]+'.mtl','w').write(mtl_text)
+            total_v = sum(len(sm.get('positions',[])) for sm in parsed['submeshes'])
+            self.statusBar().showMessage(f"Exported {path} ({total_v:,} vertices)")
+
+    def _ng_export_raw(self, asset):
+        fn = asset.get('filename', 'resource.bin')
+        path, _ = QFileDialog.getSaveFileName(self, "Export Resource", fn)
+        if path:
+            open(path, 'wb').write(asset.get('data', b''))
+            self.statusBar().showMessage(f"Exported to {path}")
+
+    def _ng_export_entities(self, str_path):
+        import json
+        entities = self._ng_resmgr.get_entity_list(str_path)
+        path, _ = QFileDialog.getSaveFileName(self, "Export Entities", "entities.json", "JSON (*.json)")
+        if not path: return
+        out = []
+        for e in entities:
+            entry = {'index': e.get('index'), 'class': e['class'],
+                     'class_hash': f"0x{e.get('class_hash',0):08X}", 'behaviors': []}
+            for b in e.get('behaviors', []):
+                beh = {'name': b['name'], 'hash': f"0x{b['hash']:08X}", 'attrs': {}}
+                for ai, (t, v) in b.get('attrs', {}).items():
+                    if t == 'matrix': v = {'pos': list(v.get('pos', []))}
+                    beh['attrs'][str(ai)] = {'type': t, 'value': v}
+                entry['behaviors'].append(beh)
+            out.append(entry)
+        open(path, 'w').write(json.dumps(out, indent=2, default=str))
+        self.statusBar().showMessage(f"Exported {len(entities)} entities to {path}")
 
     def _open_elf(self):
         p,_=QFileDialog.getOpenFileName(self,"Open ELF/DOL/Ghidra Export","",
@@ -4049,6 +4409,22 @@ class AsuraExplorer(QMainWindow):
                 level = parse_level_data(self._chunks, self._files)
                 self.lvlv.load_level(level); self.vs.setCurrentIndex(8)
             except Exception as e: self.statusBar().showMessage(f"Level error: {e}")
+        # ---- New-Gen item routing ----
+        elif k=='ng_resource' and HAS_NEWGEN:
+            self._ng_show_resource(d[1], d[2])
+        elif k=='ng_entities' and HAS_NEWGEN:
+            self._ng_show_entities(d[1])
+        elif k=='ng_str' and HAS_NEWGEN:
+            entry = self._ng_resmgr.str_files.get(d[1])
+            if entry:
+                n_a = len(entry['assets']); n_e = sum(sg.get('n_entities',0) for sg in entry['simgroups'])
+                from collections import Counter
+                types = Counter(a.get('resource_type','?') for a in entry['assets'])
+                info = f"STR Archive: {entry['rel_path']}\n{n_a} resources, {n_e} entities\n\n"
+                info += "Resource types:\n"
+                for t, c in types.most_common(): info += f"  {t:25s}: {c}\n"
+                self.chunkv._hex.setPlainText(info)
+                self.chunkv._title.setText(f"📁  {entry['rel_path']}"); self.vs.setCurrentWidget(self.chunkv)
 
     def _ctx(self, pos):
         it=self.tree.itemAt(pos); 
@@ -4085,6 +4461,15 @@ class AsuraExplorer(QMainWindow):
                     menu.addAction("Replace Audio (WAV→DSP)...").triggered.connect(lambda _=False, _f=f: self._replace_audio(_f))
                 menu.addAction("Replace Raw File Data...").triggered.connect(lambda _=False, _f=f: self._replace_raw(_f))
         elif d[0]=='chunk': menu.addAction("Export Raw Chunk...").triggered.connect(lambda _=False, _c=d[1]: self._ex_rchunk(_c))
+        # ---- New-Gen context menu ----
+        elif d[0]=='ng_resource' and HAS_NEWGEN:
+            asset = d[1]
+            menu.addAction("Export Raw Data...").triggered.connect(lambda _=False, _a=asset: self._ng_export_raw(_a))
+            if asset.get('resource_type') == 'EARS_MESH':
+                menu.addAction("Export as OBJ...").triggered.connect(lambda _=False, _a=asset: self._ng_export_obj(_a))
+            menu.addAction("Copy Filename").triggered.connect(lambda: QApplication.clipboard().setText(asset.get('filename','')))
+        elif d[0]=='ng_entities' and HAS_NEWGEN:
+            menu.addAction("Export Entities as JSON...").triggered.connect(lambda _=False, _p=d[1]: self._ng_export_entities(_p))
         if menu.actions(): menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _show(self, f):
@@ -4650,7 +5035,7 @@ class AsuraExplorer(QMainWindow):
             import traceback; traceback.print_exc()
 
     def _exp_level(self):
-        """Export level env mesh as OBJ using existing tsg_tool.cmd_env logic."""
+        """Export level env mesh as OBJ using existing tsg_oldgen.cmd_env logic."""
         env_data = None
         for f in self._files:
             if f['name'] == 'StrippedEnv': env_data = f['data']; break
@@ -4660,7 +5045,7 @@ class AsuraExplorer(QMainWindow):
         if not out: return
         bn = os.path.splitext(os.path.basename(self._path))[0]
         obj_path = os.path.join(out, bn + '_Env_mesh.obj')
-        # Use the existing env export in tsg_tool
+        # Use the existing env export in tsg_oldgen
         import argparse
         args = argparse.Namespace(input=[self._path], output=out)
         try:
